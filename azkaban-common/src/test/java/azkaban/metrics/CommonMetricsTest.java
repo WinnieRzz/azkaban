@@ -16,40 +16,31 @@
 
 package azkaban.metrics;
 
-import azkaban.metrics.MetricsTestUtility.DummyReporter;
+import static org.junit.Assert.assertEquals;
 
-import java.util.concurrent.TimeUnit;
-import java.time.Duration;
-
-import org.junit.After;
+import com.codahale.metrics.MetricRegistry;
 import org.junit.Before;
 import org.junit.Test;
 
+
 public class CommonMetricsTest {
 
-  private DummyReporter dr;
+  private MetricsTestUtility testUtil;
+  private CommonMetrics metrics;
 
   @Before
-  public void setup() {
-    dr = new DummyReporter(MetricsManager.INSTANCE.getRegistry());
-    dr.start(Duration.ofMillis(2).toMillis(), TimeUnit.MILLISECONDS);
-  }
-
-  @After
-  public void shutdown() {
-    if (null != dr)
-      dr.stop();
-
-    dr = null;
+  public void setUp() {
+    final MetricRegistry metricRegistry = new MetricRegistry();
+    this.testUtil = new MetricsTestUtility(metricRegistry);
+    this.metrics = new CommonMetrics(new MetricsManager(metricRegistry));
   }
 
   @Test
-  public void testMarkDBConnectionMetrics() {
-    MetricsTestUtility.testMeter("DB-Connection-meter", dr, CommonMetrics.INSTANCE::markDBConnection);
-  }
+  public void testOOMWaitingJobMetrics() {
+    final String metricName = "OOM-waiting-job-count";
 
-  @Test
-  public void testDBConnectionTimeMetrics() {
-    MetricsTestUtility.testGauge("dbConnectionTime", dr, CommonMetrics.INSTANCE::setDBConnectionTime);
+    assertEquals(0, this.testUtil.getGaugeValue(metricName));
+    this.metrics.incrementOOMJobWaitCount();
+    assertEquals(1, this.testUtil.getGaugeValue(metricName));
   }
 }
