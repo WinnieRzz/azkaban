@@ -52,6 +52,22 @@ public interface FlowTriggerInstanceLoader {
    */
   Collection<TriggerInstance> getRecentlyFinished(int limit);
 
+  /**
+   * Retrieve running trigger instances.
+   */
+  Collection<TriggerInstance> getRunning();
+
   TriggerInstance getTriggerInstanceById(String triggerInstanceId);
 
+  TriggerInstance getTriggerInstanceByFlowExecId(int execId);
+
+  Collection<TriggerInstance> getTriggerInstances(int projectId, String flowId, int from, int
+      length);
+
+  /**
+   * Delete cancelled or succeeded trigger instances whose endtime is older than the timestamp
+   *
+   * @return number of deleted rows(dependency instances) ;
+   */
+  int deleteTriggerExecutionsFinishingOlderThan(long timestamp);
 }

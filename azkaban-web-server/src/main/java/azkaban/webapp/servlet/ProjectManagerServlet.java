@@ -465,6 +465,13 @@ public class ProjectManagerServlet extends LoginAbstractAzkabanServlet {
       return;
     }
 
+    if (!hasPermission(project, user, Type.READ)) {
+      this.setErrorMessageInCookie(resp, "No permission to download project " + projectName
+          + ".");
+      resp.sendRedirect(req.getContextPath());
+      return;
+    }
+
     int version = -1;
     if (hasParam(req, "version")) {
       version = getIntParam(req, "version");
@@ -1664,6 +1671,11 @@ public class ProjectManagerServlet extends LoginAbstractAzkabanServlet {
     final User user = session.getUser();
     final String projectName = (String) multipart.get("project");
     final Project project = this.projectManager.getProject(projectName);
+    if (!project.isActive()) {
+      registerError(ret, "Installation Failed. Project '" + project.getName()
+          + "' was already removed.", resp, 410);
+      return;
+    }
     logger.info(
         "Upload: reference of project " + projectName + " is " + System.identityHashCode(project));
 
@@ -1723,6 +1735,8 @@ public class ProjectManagerServlet extends LoginAbstractAzkabanServlet {
         //unscheduleall/scheduleall should only work with flow which has defined flow trigger
         //unschedule all flows within the old project
         if (this.enableQuartz) {
+          //todo chengren311: should maintain atomicity,
+          // e.g, if uploadProject fails, associated schedule shouldn't be added.
           this.scheduler.unscheduleAll(project);
         }
         final Map<String, ValidationReport> reports =

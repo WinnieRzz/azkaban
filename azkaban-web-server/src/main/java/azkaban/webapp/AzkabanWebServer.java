@@ -228,6 +228,8 @@ public class AzkabanWebServer extends AzkabanServer {
     /* This creates the Web Server instance */
     app = webServer;
 
+    webServer.executorManager.start();
+
     // TODO refactor code into ServerProvider
     webServer.prepareAndStartServer();
 
@@ -235,17 +237,22 @@ public class AzkabanWebServer extends AzkabanServer {
 
       @Override
       public void run() {
-        if (webServer.scheduler != null) {
-          logger.info("Shutting down flow trigger scheduler...");
-          webServer.scheduler.shutdown();
+        try {
+          if (webServer.props.getBoolean(ConfigurationKeys.ENABLE_QUARTZ, false)) {
+            logger.info("Shutting down flow trigger scheduler...");
+            webServer.scheduler.shutdown();
+          }
+        } catch (final Exception e) {
+          logger.error("Exception while shutting down flow trigger service.", e);
         }
 
         try {
-          if (webServer.flowTriggerService != null) {
+          if (webServer.props.getBoolean(ConfigurationKeys.ENABLE_QUARTZ, false)) {
+            logger.info("Shutting down flow trigger service...");
             webServer.flowTriggerService.shutdown();
           }
         } catch (final Exception e) {
-          logger.error(("Exception while shutting down flow trigger service."), e);
+          logger.error("Exception while shutting down flow trigger service.", e);
         }
 
         try {
@@ -256,7 +263,7 @@ public class AzkabanWebServer extends AzkabanServer {
           webServer.close();
 
         } catch (final Exception e) {
-          logger.error(("Exception while shutting down web server."), e);
+          logger.error("Exception while shutting down web server.", e);
         }
 
         logger.info("kk thx bye.");
