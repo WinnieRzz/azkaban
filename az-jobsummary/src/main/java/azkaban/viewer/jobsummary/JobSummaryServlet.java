@@ -13,7 +13,6 @@
  * License for the specific language governing permissions and limitations under
  * the License.
  */
-
 package azkaban.viewer.jobsummary;
 
 import azkaban.executor.ExecutableFlow;
@@ -23,7 +22,6 @@ import azkaban.executor.ExecutorManagerException;
 import azkaban.project.Project;
 import azkaban.project.ProjectManager;
 import azkaban.server.session.Session;
-import azkaban.user.Permission;
 import azkaban.user.Permission.Type;
 import azkaban.user.User;
 import azkaban.utils.Props;
@@ -33,7 +31,6 @@ import azkaban.webapp.plugin.ViewerPlugin;
 import azkaban.webapp.servlet.LoginAbstractAzkabanServlet;
 import azkaban.webapp.servlet.Page;
 import java.io.File;
-import java.io.IOException;
 import java.util.List;
 import javax.servlet.ServletConfig;
 import javax.servlet.ServletException;
@@ -41,23 +38,18 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 import org.apache.log4j.Logger;
 
+
 public class JobSummaryServlet extends LoginAbstractAzkabanServlet {
-  private static final String PROXY_USER_SESSION_KEY =
-      "hdfs.browser.proxy.user";
-  private static final String HADOOP_SECURITY_MANAGER_CLASS_PARAM =
-      "hadoop.security.manager.class";
+
   private static final Logger logger = Logger.getLogger(JobSummaryServlet.class);
 
   private final Props props;
   private final File webResourcesPath;
-
   private final String viewerName;
   private final String viewerPath;
 
-  private ExecutorManagerAdapter executorManager;
+  private ExecutorManagerAdapter executorManagerAdapter;
   private ProjectManager projectManager;
-
-  private String outputDir;
 
   public JobSummaryServlet(final Props props) {
     this.props = props;
@@ -71,28 +63,16 @@ public class JobSummaryServlet extends LoginAbstractAzkabanServlet {
     setResourceDirectory(this.webResourcesPath);
   }
 
-  private Project getProjectByPermission(final int projectId, final User user,
-      final Permission.Type type) {
-    final Project project = this.projectManager.getProject(projectId);
-    if (project == null) {
-      return null;
-    }
-    if (!hasPermission(project, user, type)) {
-      return null;
-    }
-    return project;
-  }
-
   @Override
   public void init(final ServletConfig config) throws ServletException {
     super.init(config);
     final AzkabanWebServer server = (AzkabanWebServer) getApplication();
-    this.executorManager = server.getExecutorManager();
+    this.executorManagerAdapter = server.getExecutorManager();
     this.projectManager = server.getProjectManager();
   }
 
   private void handleViewer(final HttpServletRequest req, final HttpServletResponse resp,
-      final Session session) throws ServletException, IOException {
+      final Session session) throws ServletException {
 
     final Page page =
         newPage(req, resp, session,
@@ -112,7 +92,7 @@ public class JobSummaryServlet extends LoginAbstractAzkabanServlet {
     ExecutableFlow flow = null;
     ExecutableNode node = null;
     try {
-      flow = this.executorManager.getExecutableFlow(execId);
+      flow = this.executorManagerAdapter.getExecutableFlow(execId);
       if (flow == null) {
         page.add("errorMsg", "Error loading executing flow " + execId
             + ": not found.");
@@ -138,7 +118,8 @@ public class JobSummaryServlet extends LoginAbstractAzkabanServlet {
     }
 
     final int projectId = flow.getProjectId();
-    final Project project = getProjectByPermission(projectId, user, Type.READ);
+    final Project project = filterProjectByPermission(this.projectManager.getProject(projectId),
+        user, Type.READ);
     if (project == null) {
       page.render();
       return;
@@ -153,8 +134,7 @@ public class JobSummaryServlet extends LoginAbstractAzkabanServlet {
   }
 
   private void handleDefault(final HttpServletRequest request,
-      final HttpServletResponse response, final Session session) throws ServletException,
-      IOException {
+      final HttpServletResponse response, final Session session) {
     final Page page =
         newPage(request, response, session,
             "azkaban/viewer/jobsummary/velocity/jobsummary.vm");
@@ -166,8 +146,7 @@ public class JobSummaryServlet extends LoginAbstractAzkabanServlet {
 
   @Override
   protected void handleGet(final HttpServletRequest request,
-      final HttpServletResponse response, final Session session) throws ServletException,
-      IOException {
+      final HttpServletResponse response, final Session session) throws ServletException {
     if (hasParam(request, "execid") && hasParam(request, "jobid")) {
       handleViewer(request, response, session);
     } else {
@@ -177,7 +156,6 @@ public class JobSummaryServlet extends LoginAbstractAzkabanServlet {
 
   @Override
   protected void handlePost(final HttpServletRequest request,
-      final HttpServletResponse response, final Session session) throws ServletException,
-      IOException {
+      final HttpServletResponse response, final Session session) {
   }
 }

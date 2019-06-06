@@ -17,7 +17,8 @@
 package azkaban.executor;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.Matchers.anyInt;
+import static org.assertj.core.api.Assertions.catchThrowable;
+import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.Matchers.eq;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.doReturn;
@@ -26,6 +27,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import azkaban.Constants;
+import azkaban.Constants.ConfigurationKeys;
 import azkaban.alert.Alerter;
 import azkaban.metrics.CommonMetrics;
 import azkaban.metrics.MetricsManager;
@@ -35,6 +37,7 @@ import azkaban.utils.Props;
 import azkaban.utils.TestUtils;
 import com.codahale.metrics.MetricRegistry;
 import com.google.common.collect.ImmutableMap;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -66,9 +69,13 @@ public class ExecutorManagerTest {
   private User user;
   private ExecutableFlow flow1;
   private ExecutableFlow flow2;
+  private ExecutionReference ref1;
+  private ExecutionReference ref2;
   private AlerterHolder alertHolder;
   private ExecutorApiGateway apiGateway;
   private Alerter mailAlerter;
+  private RunningExecutions runningExecutions;
+  private ExecutorManagerUpdaterStage updaterStage;
 
   @Before
   public void setup() {
@@ -77,6 +84,8 @@ public class ExecutorManagerTest {
     this.alertHolder = mock(AlerterHolder.class);
     when(this.alertHolder.get("email")).thenReturn(this.mailAlerter);
     this.loader = new MockExecutorLoader();
+    this.runningExecutions = new RunningExecutions();
+    this.updaterStage = new ExecutorManagerUpdaterStage();
   }
 
   @After
@@ -108,21 +117,15 @@ public class ExecutorManagerTest {
   }
 
   /*
-   * Test backward compatibility with just local executor
+   * Test error message with unsupported local executor conf
    */
   @Test
-  public void testLocalExecutorScenario() throws Exception {
-    this.props.put("executor.port", 12345);
-    final ExecutorManager manager = createExecutorManager();
-    final Set<Executor> activeExecutors =
-        new HashSet(manager.getAllActiveExecutors());
-
-    Assert.assertEquals(activeExecutors.size(), 1);
-    final Executor executor = activeExecutors.iterator().next();
-    Assert.assertEquals(executor.getHost(), "localhost");
-    Assert.assertEquals(executor.getPort(), 12345);
-    Assert.assertArrayEquals(activeExecutors.toArray(), this.loader
-        .fetchActiveExecutors().toArray());
+  public void testLocalExecutorScenario() {
+    this.props.put(ConfigurationKeys.EXECUTOR_PORT, 12345);
+    final Throwable thrown = catchThrowable(() -> createExecutorManager());
+    assertThat(thrown).isInstanceOf(IllegalArgumentException.class);
+    assertThat(thrown.getMessage()).isEqualTo(
+        "azkaban.use.multiple.executors must be true. Single executor mode is not supported any more.");
   }
 
   /*
@@ -143,8 +146,22 @@ public class ExecutorManagerTest {
 
   private ExecutorManager createExecutorManager()
       throws ExecutorManagerException {
-    return new ExecutorManager(this.props, this.loader, this.alertHolder, this.commonMetrics,
-        this.apiGateway);
+    // TODO rename this test to ExecutorManagerIntegrationTest & create separate unit tests as well?
+    final ActiveExecutors activeExecutors = new ActiveExecutors(this.loader);
+    final ExecutionFinalizer executionFinalizer = new ExecutionFinalizer(this.loader,
+        this.updaterStage, this.alertHolder, this.runningExecutions);
+    final RunningExecutionsUpdaterThread updaterThread = new RunningExecutionsUpdaterThread(
+        new RunningExecutionsUpdater(
+            this.updaterStage, this.alertHolder, this.commonMetrics, this.apiGateway,
+            this.runningExecutions, executionFinalizer, this.loader), this.runningExecutions);
+    updaterThread.waitTimeIdleMs = 0;
+    updaterThread.waitTimeMs = 0;
+    final ExecutorManager executorManager = new ExecutorManager(this.props, this.loader,
+        this.commonMetrics, this.apiGateway, this.runningExecutions, activeExecutors,
+        this.updaterStage, executionFinalizer, updaterThread);
+    executorManager.setSleepAfterDispatchFailure(Duration.ZERO);
+    executorManager.initialize();
+    return executorManager;
   }
 
   /*
@@ -288,16 +305,15 @@ public class ExecutorManagerTest {
   }
 
   /**
-   * 1. Executor 1 throws an exception when trying to dispatch to it
-   * 2. ExecutorManager should try next executor
-   * 3. Executor 2 accepts the dispatched execution
+   * 1. Executor 1 throws an exception when trying to dispatch to it 2. ExecutorManager should try
+   * next executor 3. Executor 2 accepts the dispatched execution
    */
   @Test
   public void testDispatchException() throws Exception {
     testSetUpForRunningFlows();
     this.manager.start();
     final ExecutableFlow flow1 = TestUtils.createTestExecutableFlow("exectest1", "exec1");
-    when(this.loader.fetchExecutableFlow(-1)).thenReturn(flow1);
+    doReturn(flow1).when(this.loader).fetchExecutableFlow(-1);
     mockFlowDoesNotExist();
     when(this.apiGateway.callWithExecutable(any(), any(), eq(ConnectorParams.EXECUTE_ACTION)))
         .thenThrow(new ExecutorManagerException("Mocked dispatch exception"))
@@ -315,6 +331,7 @@ public class ExecutorManagerTest {
    * ExecutorManager should try to dispatch to all executors & when both fail it should remove the
    * execution from queue and finalize it.
    */
+  @Ignore
   @Test
   public void testDispatchFailed() throws Exception {
     testSetUpForRunningFlows();
@@ -331,7 +348,10 @@ public class ExecutorManagerTest {
     verify(this.apiGateway)
         .callWithExecutable(flow1, this.manager.fetchExecutor(2), ConnectorParams.EXECUTE_ACTION);
     verify(this.loader, Mockito.times(2)).unassignExecutor(-1);
-    verify(this.mailAlerter).alertOnError(flow1);
+    verify(this.mailAlerter).alertOnError(eq(flow1),
+        eq("Failed to dispatch queued execution derived-member-data because reached "
+            + "azkaban.maxDispatchingErrors (tried 2 executors)"),
+        contains("Mocked dispatch exception"));
   }
 
   private void mockFlowDoesNotExist() throws Exception {
@@ -346,8 +366,7 @@ public class ExecutorManagerTest {
   @SuppressWarnings("unchecked")
   private void mockUpdateResponse(
       final Map<String, List<Map<String, Object>>> map) throws Exception {
-    doReturn(map).when(this.apiGateway).callWithExecutionId(
-        any(), anyInt(), eq(ConnectorParams.UPDATE_ACTION), any(), any(), any(), any());
+    doReturn(map).when(this.apiGateway).updateExecutions(any(), any());
   }
 
   /*
@@ -385,6 +404,34 @@ public class ExecutorManagerTest {
     verify(this.loader).uploadExecutableFlow(flow2);
     this.manager.submitExecutableFlow(flow3, this.user.getUserId());
     this.manager.submitExecutableFlow(flow4, this.user.getUserId());
+  }
+
+  // Flows can be whitelisted to support a specified max number of concurrent flows.
+  @Test(expected = ExecutorManagerException.class)
+  public void testConcurrentRunWhitelist() throws Exception {
+    testSetUpForRunningFlows();
+    this.props.put(ConfigurationKeys.CONCURRENT_RUNS_ONEFLOW_WHITELIST, "basicyamlshelltest,"
+        + "bashSleep,4");
+    final ExecutableFlow flow1 = TestUtils
+        .createTestExecutableFlowFromYaml("basicyamlshelltest", "bashSleep");
+    flow1.setExecutionId(101);
+    final ExecutableFlow flow2 = TestUtils
+        .createTestExecutableFlowFromYaml("basicyamlshelltest", "bashSleep");
+    flow2.setExecutionId(102);
+    final ExecutableFlow flow3 = TestUtils
+        .createTestExecutableFlowFromYaml("basicyamlshelltest", "bashSleep");
+    flow3.setExecutionId(103);
+    final ExecutableFlow flow4 = TestUtils
+        .createTestExecutableFlowFromYaml("basicyamlshelltest", "bashSleep");
+    flow4.setExecutionId(104);
+    this.manager.submitExecutableFlow(flow1, this.user.getUserId());
+    verify(this.loader).uploadExecutableFlow(flow1);
+    this.manager.submitExecutableFlow(flow2, this.user.getUserId());
+    verify(this.loader).uploadExecutableFlow(flow2);
+    this.manager.submitExecutableFlow(flow3, this.user.getUserId());
+    verify(this.loader).uploadExecutableFlow(flow3);
+    this.manager.submitExecutableFlow(flow4, this.user.getUserId());
+    verify(this.loader).uploadExecutableFlow(flow4);
   }
 
   @Ignore
@@ -432,6 +479,80 @@ public class ExecutorManagerTest {
         activeExecutorServerHosts.contains(executor2.getHost() + ":" + executor2.getPort()));
   }
 
+  /**
+   * ExecutorManager should try to dispatch to all executors until it succeeds.
+   */
+  @Test
+  public void testDispatchMultipleRetries() throws Exception {
+    this.props.put(Constants.ConfigurationKeys.MAX_DISPATCHING_ERRORS_PERMITTED, 4);
+    testSetUpForRunningFlows();
+    this.manager.start();
+    final ExecutableFlow flow1 = TestUtils.createTestExecutableFlow("exectest1", "exec1");
+    flow1.getExecutionOptions().setFailureEmails(Arrays.asList("test@example.com"));
+    when(this.loader.fetchExecutableFlow(-1)).thenReturn(flow1);
+
+    // fail 2 first dispatch attempts, then succeed
+    when(this.apiGateway.callWithExecutable(any(), any(), eq(ConnectorParams.EXECUTE_ACTION)))
+        .thenThrow(new ExecutorManagerException("Mocked dispatch exception 1"))
+        .thenThrow(new ExecutorManagerException("Mocked dispatch exception 2"))
+        .thenReturn(null);
+
+    // this is just to clean up the execution as FAILED after it has been submitted
+    mockFlowDoesNotExist();
+
+    this.manager.submitExecutableFlow(flow1, this.user.getUserId());
+    waitFlowFinished(flow1);
+
+    // it's random which executor is chosen each time, but both should have been tried at least once
+    verify(this.apiGateway, Mockito.atLeast(1))
+        .callWithExecutable(flow1, this.manager.fetchExecutor(1), ConnectorParams.EXECUTE_ACTION);
+    verify(this.apiGateway, Mockito.atLeast(1))
+        .callWithExecutable(flow1, this.manager.fetchExecutor(2), ConnectorParams.EXECUTE_ACTION);
+
+    // verify that there was a 3rd (successful) dispatch call
+    verify(this.apiGateway, Mockito.times(3))
+        .callWithExecutable(eq(flow1), any(), eq(ConnectorParams.EXECUTE_ACTION));
+
+    verify(this.loader, Mockito.times(2)).unassignExecutor(-1);
+  }
+
+  @Test
+  public void testSetFlowLock() throws Exception {
+    testSetUpForRunningFlows();
+    final ExecutableFlow flow1 = TestUtils.createTestExecutableFlow("exectest1", "exec1");
+    flow1.setLocked(true);
+    final String msg = this.manager.submitExecutableFlow(flow1, this.user.getUserId());
+    assertThat(msg).isEqualTo("Flow derived-member-data for project flow is locked.");
+
+    // unlock the flow
+    flow1.setLocked(false);
+    this.manager.submitExecutableFlow(flow1, this.user.getUserId());
+    verify(this.loader).uploadExecutableFlow(flow1);
+    verify(this.loader).addActiveExecutableReference(any());
+  }
+
+  /**
+   * Test fetching application id from log data.
+   *
+   * @throws Exception the exception
+   */
+  @Test
+  public void testGetApplicationIdFromLog() throws Exception {
+    testSetUpForRunningFlows();
+    this.runningExecutions.get().put(1, new Pair<>(this.ref1, this.flow1));
+    // Verify that application id is obtained successfully from the log data.
+    final Map<String, Object> logData1 = ImmutableMap.of("offset", 0, "length", 33, "data",
+        "Submitted application_12345_6789.");
+    when(this.apiGateway.callWithReference(any(), eq(ConnectorParams.LOG_ACTION), any()))
+        .thenReturn(logData1);
+    Assert.assertEquals("12345_6789", this.manager.getApplicationId(this.flow1, "job1", 0));
+    // Verify that application id is null when log data length is 0 (no new data available).
+    final Map<String, Object> logData2 = ImmutableMap.of("offset", 33, "length", 0, "data", "");
+    when(this.apiGateway.callWithReference(any(), eq(ConnectorParams.LOG_ACTION), any()))
+        .thenReturn(logData2);
+    Assert.assertEquals(null, this.manager.getApplicationId(this.flow1, "job1", 0));
+  }
+
   /*
    * TODO: will move below method to setUp() and run before every test for both runningFlows and queuedFlows
    */
@@ -460,12 +581,10 @@ public class ExecutorManagerTest {
     this.flow2 = TestUtils.createTestExecutableFlow("exectest1", "exec2");
     this.flow1.setExecutionId(1);
     this.flow2.setExecutionId(2);
-    final ExecutionReference ref1 =
-        new ExecutionReference(this.flow1.getExecutionId(), executor1);
-    final ExecutionReference ref2 =
-        new ExecutionReference(this.flow2.getExecutionId(), executor2);
-    this.activeFlows.put(this.flow1.getExecutionId(), new Pair<>(ref1, this.flow1));
-    this.activeFlows.put(this.flow2.getExecutionId(), new Pair<>(ref2, this.flow2));
+    this.ref1 = new ExecutionReference(this.flow1.getExecutionId(), executor1);
+    this.ref2 = new ExecutionReference(this.flow2.getExecutionId(), executor2);
+    this.activeFlows.put(this.flow1.getExecutionId(), new Pair<>(this.ref1, this.flow1));
+    this.activeFlows.put(this.flow2.getExecutionId(), new Pair<>(this.ref2, this.flow2));
     when(this.loader.fetchActiveFlows()).thenReturn(this.activeFlows);
   }
 

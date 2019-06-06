@@ -99,9 +99,9 @@ public class InteractiveTestJob extends AbstractProcessJob {
       return;
     }
 
-    if (this.jobProps.getBoolean("fail", false)) {
-      final int passRetry = this.jobProps.getInt("passRetry", -1);
-      if (passRetry > 0 && passRetry < this.jobProps.getInt(JOB_ATTEMPT)) {
+    if (this.getJobProps().getBoolean("fail", false)) {
+      final int passRetry = this.getJobProps().getInt("passRetry", -1);
+      if (passRetry > 0 && passRetry < this.getJobProps().getInt(JOB_ATTEMPT)) {
         generateProperties(propFiles[1]);
         succeedJob();
       } else {
@@ -112,28 +112,36 @@ public class InteractiveTestJob extends AbstractProcessJob {
       throw new RuntimeException("Forced failure of " + getId());
     }
 
+    boolean succeedAfterSleep = this.getJobProps().containsKey("fail");
+
+    final long waitMillis;
+    if (succeedAfterSleep) {
+      waitMillis = this.getJobProps().getInt("seconds", 10) * 1000L;
+    } else {
+      // this means that job should not exit without external interaction, so exact wait time
+      // doesn't matter. have some non-zero value to avoid busy-looping.
+      waitMillis = 10_000L;
+    }
+
     while (this.isWaiting) {
       synchronized (this) {
-        final int waitMillis = this.jobProps.getInt("seconds", 10) * 1000;
         if (waitMillis > 0) {
           try {
             wait(waitMillis);
           } catch (final InterruptedException e) {
           }
         }
-        if (this.jobProps.containsKey("fail")) {
+        if (succeedAfterSleep) {
           generateProperties(propFiles[1]);
           succeedJob();
         }
-
-        if (!this.isWaiting) {
-          if (!this.succeed) {
-            throw new RuntimeException("Forced failure of " + getId());
-          } else {
-            info("Job " + getId() + " succeeded.");
-          }
-        }
       }
+    }
+
+    if (!this.succeed) {
+      throw new RuntimeException("Forced failure of " + getId());
+    } else {
+      info("Job " + getId() + " succeeded.");
     }
   }
 
@@ -174,7 +182,7 @@ public class InteractiveTestJob extends AbstractProcessJob {
   }
 
   @Override
-  public void cancel() throws InterruptedException {
+  public void cancel() {
     info("Killing job");
     if (!this.ignoreCancel) {
       failJob();

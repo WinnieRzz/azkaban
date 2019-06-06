@@ -24,11 +24,8 @@ import azkaban.executor.Executor;
 import azkaban.executor.ExecutorManagerException;
 import azkaban.executor.Status;
 import azkaban.utils.EmailMessage;
-import azkaban.utils.Utils;
-import java.text.DateFormat;
-import java.text.SimpleDateFormat;
+import azkaban.utils.TimeUtils;
 import java.util.ArrayList;
-import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import org.apache.commons.lang.exception.ExceptionUtils;
@@ -36,8 +33,6 @@ import org.apache.commons.lang.exception.ExceptionUtils;
 public class DefaultMailCreator implements MailCreator {
 
   public static final String DEFAULT_MAIL_CREATOR = "default";
-  private static final DateFormat DATE_FORMATTER = new SimpleDateFormat(
-      "yyyy/MM/dd HH:mm:ss z");
   private static final HashMap<String, MailCreator> registeredCreators = new HashMap<>();
   private static final MailCreator defaultCreator;
 
@@ -58,14 +53,6 @@ public class DefaultMailCreator implements MailCreator {
     return creator;
   }
 
-  private static String convertMSToString(final long timeInMS) {
-    if (timeInMS < 0) {
-      return "N/A";
-    } else {
-      return DATE_FORMATTER.format(new Date(timeInMS));
-    }
-  }
-
   private static List<String> findFailedJobs(final ExecutableFlow flow) {
     final ArrayList<String> failedJobs = new ArrayList<>();
     for (final ExecutableNode node : flow.getExecutableNodes()) {
@@ -79,7 +66,7 @@ public class DefaultMailCreator implements MailCreator {
   @Override
   public boolean createFirstErrorMessage(final ExecutableFlow flow,
       final EmailMessage message, final String azkabanName, final String scheme,
-      final String clientHostname, final String clientPortNumber, final String... vars) {
+      final String clientHostname, final String clientPortNumber) {
 
     final ExecutionOptions option = flow.getExecutionOptions();
     final List<String> emailList = option.getFailureEmails();
@@ -108,11 +95,11 @@ public class DefaultMailCreator implements MailCreator {
 
       message.println("<table>");
       message.println("<tr><td>Start Time</td><td>"
-          + convertMSToString(flow.getStartTime()) + "</td></tr>");
+          + TimeUtils.formatDateTimeZone(flow.getStartTime()) + "</td></tr>");
       message.println("<tr><td>End Time</td><td>"
-          + convertMSToString(flow.getEndTime()) + "</td></tr>");
+          + TimeUtils.formatDateTimeZone(flow.getEndTime()) + "</td></tr>");
       message.println("<tr><td>Duration</td><td>"
-          + Utils.formatDuration(flow.getStartTime(), flow.getEndTime())
+          + TimeUtils.formatDuration(flow.getStartTime(), flow.getEndTime())
           + "</td></tr>");
       message.println("<tr><td>Status</td><td>" + flow.getStatus() + "</td></tr>");
       message.println("</table>");
@@ -142,7 +129,7 @@ public class DefaultMailCreator implements MailCreator {
   @Override
   public boolean createErrorEmail(final ExecutableFlow flow, final List<ExecutableFlow>
       pastExecutions, final EmailMessage message, final String azkabanName, final String scheme,
-      final String clientHostname, final String clientPortNumber, final String... vars) {
+      final String clientHostname, final String clientPortNumber, final String... reasons) {
 
     final ExecutionOptions option = flow.getExecutionOptions();
 
@@ -160,11 +147,11 @@ public class DefaultMailCreator implements MailCreator {
           + flow.getProjectName() + "' has failed on " + azkabanName + "</h2>");
       message.println("<table>");
       message.println("<tr><td>Start Time</td><td>"
-          + convertMSToString(flow.getStartTime()) + "</td></tr>");
+          + TimeUtils.formatDateTimeZone(flow.getStartTime()) + "</td></tr>");
       message.println("<tr><td>End Time</td><td>"
-          + convertMSToString(flow.getEndTime()) + "</td></tr>");
+          + TimeUtils.formatDateTimeZone(flow.getEndTime()) + "</td></tr>");
       message.println("<tr><td>Duration</td><td>"
-          + Utils.formatDuration(flow.getStartTime(), flow.getEndTime())
+          + TimeUtils.formatDuration(flow.getStartTime(), flow.getEndTime())
           + "</td></tr>");
       message.println("<tr><td>Status</td><td>" + flow.getStatus() + "</td></tr>");
       message.println("</table>");
@@ -183,8 +170,8 @@ public class DefaultMailCreator implements MailCreator {
         message.println("<li><a href=\"" + executionUrl + "&job=" + jobId
             + "\">Failed job '" + jobId + "' Link</a></li>");
       }
-      for (final String reasons : vars) {
-        message.println("<li>" + reasons + "</li>");
+      for (final String reason : reasons) {
+        message.println("<li>" + reason + "</li>");
       }
 
       message.println("</ul>");
@@ -205,9 +192,9 @@ public class DefaultMailCreator implements MailCreator {
         message.println(
             "<tr><td>Execution Id</td><td>" + (executableFlow.getExecutionId()) + "</td></tr>");
         message.println("<tr><td>Start Time</td><td>"
-            + convertMSToString(executableFlow.getStartTime()) + "</td></tr>");
+            + TimeUtils.formatDateTimeZone(executableFlow.getStartTime()) + "</td></tr>");
         message.println("<tr><td>End Time</td><td>"
-            + convertMSToString(executableFlow.getEndTime()) + "</td></tr>");
+            + TimeUtils.formatDateTimeZone(executableFlow.getEndTime()) + "</td></tr>");
         message.println("<tr><td>Status</td><td>" + executableFlow.getStatus() + "</td></tr>");
         message.println("</table>");
       }
@@ -220,7 +207,7 @@ public class DefaultMailCreator implements MailCreator {
   @Override
   public boolean createSuccessEmail(final ExecutableFlow flow, final EmailMessage message,
       final String azkabanName, final String scheme, final String clientHostname,
-      final String clientPortNumber, final String... vars) {
+      final String clientPortNumber) {
 
     final ExecutionOptions option = flow.getExecutionOptions();
     final List<String> emailList = option.getSuccessEmails();
@@ -238,11 +225,11 @@ public class DefaultMailCreator implements MailCreator {
           + flow.getProjectName() + "' has succeeded on " + azkabanName + "</h2>");
       message.println("<table>");
       message.println("<tr><td>Start Time</td><td>"
-          + convertMSToString(flow.getStartTime()) + "</td></tr>");
+          + TimeUtils.formatDateTimeZone(flow.getStartTime()) + "</td></tr>");
       message.println("<tr><td>End Time</td><td>"
-          + convertMSToString(flow.getEndTime()) + "</td></tr>");
+          + TimeUtils.formatDateTimeZone(flow.getEndTime()) + "</td></tr>");
       message.println("<tr><td>Duration</td><td>"
-          + Utils.formatDuration(flow.getStartTime(), flow.getEndTime())
+          + TimeUtils.formatDuration(flow.getStartTime(), flow.getEndTime())
           + "</td></tr>");
       message.println("<tr><td>Status</td><td>" + flow.getStatus() + "</td></tr>");
       message.println("</table>");

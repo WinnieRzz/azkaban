@@ -13,11 +13,10 @@
  * License for the specific language governing permissions and limitations under
  * the License.
  */
-
 package azkaban.execapp;
 
-import static azkaban.Constants.AZKABAN_EXECUTOR_PORT_FILENAME;
 import static azkaban.Constants.ConfigurationKeys;
+import static azkaban.Constants.DEFAULT_EXECUTOR_PORT_FILE;
 import static azkaban.ServiceProvider.SERVICE_PROVIDER;
 import static azkaban.execapp.ExecJettyServerModule.EXEC_JETTY_SERVER;
 import static azkaban.execapp.ExecJettyServerModule.EXEC_ROOT_CONTEXT;
@@ -43,7 +42,9 @@ import azkaban.metric.MetricException;
 import azkaban.metric.MetricReportManager;
 import azkaban.metric.inmemoryemitter.InMemoryMetricEmitter;
 import azkaban.metrics.MetricsManager;
+import azkaban.server.IMBeanRegistrable;
 import azkaban.server.AzkabanServer;
+import azkaban.server.MBeanRegistrationManager;
 import azkaban.utils.FileIOUtils;
 import azkaban.utils.Props;
 import azkaban.utils.StdOutErrRedirect;
@@ -54,7 +55,6 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.lang.management.ManagementFactory;
 import java.lang.reflect.Constructor;
 import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
@@ -62,15 +62,11 @@ import java.nio.file.Paths;
 import java.security.Permission;
 import java.security.Policy;
 import java.security.ProtectionDomain;
-import java.util.ArrayList;
-import java.util.List;
+import java.time.Duration;
 import java.util.TimeZone;
 import javax.inject.Inject;
 import javax.inject.Named;
 import javax.inject.Singleton;
-import javax.management.MBeanInfo;
-import javax.management.MBeanServer;
-import javax.management.ObjectName;
 import org.apache.commons.lang.StringUtils;
 import org.apache.log4j.Logger;
 import org.joda.time.DateTimeZone;
@@ -78,8 +74,9 @@ import org.mortbay.jetty.Connector;
 import org.mortbay.jetty.Server;
 import org.mortbay.jetty.servlet.Context;
 
+
 @Singleton
-public class AzkabanExecutorServer {
+public class AzkabanExecutorServer implements IMBeanRegistrable {
 
   public static final String JOBTYPE_PLUGIN_DIR = "azkaban.jobtype.plugin.dir";
   public static final String METRIC_INTERVAL = "executor.metric.milisecinterval.";
@@ -89,7 +86,7 @@ public class AzkabanExecutorServer {
 
   private static AzkabanExecutorServer app;
 
-  private final ExecMetrics execMetrics;
+  private final MBeanRegistrationManager mbeanRegistrationManager = new MBeanRegistrationManager();
   private final ExecutorLoader executionLoader;
   private final FlowRunnerManager runnerManager;
   private final MetricsManager metricsManager;
@@ -97,23 +94,18 @@ public class AzkabanExecutorServer {
   private final Server server;
   private final Context root;
 
-  private final ArrayList<ObjectName> registeredMBeans = new ArrayList<>();
-  private MBeanServer mbeanServer;
-
   @Inject
   public AzkabanExecutorServer(final Props props,
       final ExecutorLoader executionLoader,
       final FlowRunnerManager runnerManager,
       final MetricsManager metricsManager,
-      final ExecMetrics execMetrics,
       @Named(EXEC_JETTY_SERVER) final Server server,
-      @Named(EXEC_ROOT_CONTEXT) final Context root) throws Exception {
+      @Named(EXEC_ROOT_CONTEXT) final Context root) {
     this.props = props;
     this.executionLoader = executionLoader;
     this.runnerManager = runnerManager;
 
     this.metricsManager = metricsManager;
-    this.execMetrics = execMetrics;
     this.server = server;
     this.root = root;
   }
@@ -174,34 +166,34 @@ public class AzkabanExecutorServer {
         try {
           logTopMemoryConsumers();
         } catch (final Exception e) {
-          logger.info(("Exception when logging top memory consumers"), e);
+          AzkabanExecutorServer.logger.info(("Exception when logging top memory consumers"), e);
         }
 
-        final String host = app.getHost();
-        final int port = app.getPort();
+        final String host = AzkabanExecutorServer.app.getHost();
+        final int port = AzkabanExecutorServer.app.getPort();
         try {
-          logger.info(String
+          AzkabanExecutorServer.logger.info(String
               .format("Removing executor(host: %s, port: %s) entry from database...", host, port));
-          app.getExecutorLoader().removeExecutor(host, port);
+          AzkabanExecutorServer.app.getExecutorLoader().removeExecutor(host, port);
         } catch (final ExecutorManagerException ex) {
-          logger.error(
+          AzkabanExecutorServer.logger.error(
               String.format("Exception when removing executor(host: %s, port: %s)", host, port),
               ex);
         }
 
-        logger.warn("Shutting down executor...");
+        AzkabanExecutorServer.logger.warn("Shutting down executor...");
         try {
-          app.shutdownNow();
-          app.getFlowRunnerManager().deleteExecutionDirectory();
+          AzkabanExecutorServer.app.shutdownNow();
+          AzkabanExecutorServer.app.getFlowRunnerManager().deleteExecutionDirectory();
         } catch (final Exception e) {
-          logger.error("Error while shutting down http server.", e);
+          AzkabanExecutorServer.logger.error("Error while shutting down http server.", e);
         }
       }
 
       public void logTopMemoryConsumers() throws Exception, IOException {
         if (new File("/bin/bash").exists() && new File("/bin/ps").exists()
             && new File("/usr/bin/head").exists()) {
-          logger.info("logging top memory consumer");
+          AzkabanExecutorServer.logger.info("logging top memory consumer");
 
           final java.lang.ProcessBuilder processBuilder =
               new java.lang.ProcessBuilder("/bin/bash", "-c",
@@ -214,7 +206,7 @@ public class AzkabanExecutorServer {
               new java.io.BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8));
           String line = null;
           while ((line = reader.readLine()) != null) {
-            logger.info(line);
+            AzkabanExecutorServer.logger.info(line);
           }
           is.close();
         }
@@ -259,13 +251,11 @@ public class AzkabanExecutorServer {
     logger.info("Started Executor Server on " + getExecutorHostPort());
 
     if (this.props.getBoolean(ConfigurationKeys.IS_METRICS_ENABLED, false)) {
-      startExecMetrics();
+      startReportingExecMetrics();
     }
   }
 
-  private void startExecMetrics() throws Exception {
-    this.execMetrics.addFlowRunnerManagerMetrics(getFlowRunnerManager());
-
+  private void startReportingExecMetrics() {
     logger.info("starting reporting Executor Metrics");
     this.metricsManager.startReporting("AZ-EXEC", this.props);
   }
@@ -277,7 +267,10 @@ public class AzkabanExecutorServer {
       checkState(port != -1);
       final Executor executor = this.executionLoader.fetchExecutor(host, port);
       if (executor == null) {
+        logger.info("This executor wasn't found in the DB. Adding self.");
         this.executionLoader.addExecutor(host, port);
+      } else {
+        logger.info("This executor is already in the DB. Found: " + executor);
       }
       // If executor already exists, ignore it
     } catch (final ExecutorManagerException e) {
@@ -289,7 +282,7 @@ public class AzkabanExecutorServer {
   private void dumpPortToFile() throws IOException {
     // By default this should write to the working directory
     final String portFileName = this.props
-        .getString(Constants.AZKABAN_EXECUTOR_PORT_FILE, AZKABAN_EXECUTOR_PORT_FILENAME);
+        .getString(ConfigurationKeys.EXECUTOR_PORT_FILE, DEFAULT_EXECUTOR_PORT_FILE);
     FileIOUtils.dumpNumberToFile(Paths.get(portFileName), getPort());
   }
 
@@ -366,8 +359,7 @@ public class AzkabanExecutorServer {
       try {
         logger.info("jmxAttributeEmitter: " + jmxAttributeEmitter);
         final Constructor<Props>[] constructors =
-            (Constructor<Props>[]) Class.forName(jmxAttributeEmitter)
-                .getConstructors();
+            (Constructor<Props>[]) Class.forName(jmxAttributeEmitter).getConstructors();
 
         constructors[0].newInstance(props.toProperties());
       } catch (final Exception e) {
@@ -398,77 +390,13 @@ public class AzkabanExecutorServer {
     return this.runnerManager;
   }
 
-  private void configureMBeanServer() {
-    logger.info("Registering MBeans...");
-    this.mbeanServer = ManagementFactory.getPlatformMBeanServer();
-
-    registerMbean("executorJetty", new JmxJettyServer(this.server));
-    registerMbean("flowRunnerManager", new JmxFlowRunnerManager(this.runnerManager));
-    registerMbean("jobJMXMBean", JmxJobMBeanManager.getInstance());
-
-    if (JobCallbackManager.isInitialized()) {
-      final JobCallbackManager jobCallbackMgr = JobCallbackManager.getInstance();
-      registerMbean("jobCallbackJMXMBean",
-          jobCallbackMgr.getJmxJobCallbackMBean());
-    }
-  }
-
-  public void close() {
-    try {
-      for (final ObjectName name : this.registeredMBeans) {
-        this.mbeanServer.unregisterMBean(name);
-        logger.info("Jmx MBean " + name.getCanonicalName() + " unregistered.");
-      }
-    } catch (final Exception e) {
-      logger.error("Failed to cleanup MBeanServer", e);
-    }
-  }
-
-  private void registerMbean(final String name, final Object mbean) {
-    final Class<?> mbeanClass = mbean.getClass();
-    final ObjectName mbeanName;
-    try {
-      mbeanName = new ObjectName(mbeanClass.getName() + ":name=" + name);
-      this.mbeanServer.registerMBean(mbean, mbeanName);
-      logger.info("Bean " + mbeanClass.getCanonicalName() + " registered.");
-      this.registeredMBeans.add(mbeanName);
-    } catch (final Exception e) {
-      logger.error("Error registering mbean " + mbeanClass.getCanonicalName(),
-          e);
-    }
-
-  }
-
-  public List<ObjectName> getMbeanNames() {
-    return this.registeredMBeans;
-  }
-
-  public MBeanInfo getMBeanInfo(final ObjectName name) {
-    try {
-      return this.mbeanServer.getMBeanInfo(name);
-    } catch (final Exception e) {
-      logger.error(e);
-      return null;
-    }
-  }
-
-  public Object getMBeanAttribute(final ObjectName name, final String attribute) {
-    try {
-      return this.mbeanServer.getAttribute(name, attribute);
-    } catch (final Exception e) {
-      logger.error(e);
-      return null;
-    }
-  }
-
-
   /**
    * Get the hostname
    *
    * @return hostname
    */
   public String getHost() {
-    if (this.props.containsKey(Constants.ConfigurationKeys.AZKABAN_SERVER_HOST_NAME)) {
+    if (this.props.containsKey(ConfigurationKeys.AZKABAN_SERVER_HOST_NAME)) {
       final String hostName = this.props
           .getString(Constants.ConfigurationKeys.AZKABAN_SERVER_HOST_NAME);
       if (!StringUtils.isEmpty(hostName)) {
@@ -505,6 +433,14 @@ public class AzkabanExecutorServer {
     return getHost() + ":" + getPort();
   }
 
+  private void sleep(final Duration duration) {
+    try {
+      Thread.sleep(duration.toMillis());
+    } catch (final InterruptedException e) {
+      logger.error(e);
+    }
+  }
+
   /**
    * Shutdown the server. - performs a safe shutdown. Waits for completion of current tasks - spawns
    * a shutdown thread and returns immediately.
@@ -512,12 +448,8 @@ public class AzkabanExecutorServer {
   public void shutdown() {
     logger.warn("Shutting down AzkabanExecutorServer...");
     new Thread(() -> {
-      try {
-        // Hack: Sleep for a little time to allow API calls to complete
-        Thread.sleep(2000);
-      } catch (InterruptedException e) {
-        logger.error(e);
-      }
+      // Hack: Sleep for a little time to allow API calls to complete
+      sleep(Duration.ofSeconds(2));
       shutdownInternal();
     }, "shutdown").start();
   }
@@ -529,6 +461,9 @@ public class AzkabanExecutorServer {
    */
   private void shutdownInternal() {
     getFlowRunnerManager().shutdown();
+    // Sleep for an hour to wait for web server updater thread
+    // {@link azkaban.executor.RunningExecutionsUpdaterThread#updateExecutions} to finalize updating
+    sleep(Duration.ofHours(1));
     // trigger shutdown hook
     System.exit(0);
   }
@@ -540,6 +475,27 @@ public class AzkabanExecutorServer {
     this.server.stop();
     this.server.destroy();
     getFlowRunnerManager().shutdownNow();
-    close();
+    this.mbeanRegistrationManager.closeMBeans();
+  }
+
+  @Override
+  public void configureMBeanServer() {
+    logger.info("Registering MBeans...");
+
+    this.mbeanRegistrationManager.registerMBean("executorJetty", new JmxJettyServer(this.server));
+    this.mbeanRegistrationManager
+        .registerMBean("flowRunnerManager", new JmxFlowRunnerManager(this.runnerManager));
+    this.mbeanRegistrationManager.registerMBean("jobJMXMBean", JmxJobMBeanManager.getInstance());
+
+    if (JobCallbackManager.isInitialized()) {
+      final JobCallbackManager jobCallbackMgr = JobCallbackManager.getInstance();
+      this.mbeanRegistrationManager
+          .registerMBean("jobCallbackJMXMBean", jobCallbackMgr.getJmxJobCallbackMBean());
+    }
+  }
+
+  @Override
+  public MBeanRegistrationManager getMBeanRegistrationManager() {
+    return this.mbeanRegistrationManager;
   }
 }
